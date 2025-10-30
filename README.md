@@ -83,6 +83,7 @@ cvr-i18 -s -b base.json
 - `-e, --export <DIR>`: 导出缺少键到指定目录。
 - `-s, --sort`: 排序键顺序。
 - `-b, --base <FILE>`: 指定基准文件，默认为 `en.json`。
+- `-f, --file <FILE>`: 指定单个文件处理，而不是整个目录。
 
 ## 示例
 
@@ -102,6 +103,24 @@ cvr-i18 -s -b base.json
 
    ```bash
    cvr-i18 -s
+   ```
+
+4. 检查单个文件的重复键：
+
+   ```bash
+   cvr-i18 -k -f locales/zh.json
+   ```
+
+5. 检查单个文件缺少键：
+
+   ```bash
+   cvr-i18 -m -f locales/zh.json
+   ```
+
+6. 排序单个文件：
+
+   ```bash
+   cvr-i18 -s -f locales/zh.json
    ```
 
 ## 退出码

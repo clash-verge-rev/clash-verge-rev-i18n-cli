@@ -141,6 +141,13 @@ fn main() {
                 .long("base")
                 .value_name("FILE")
                 .help("Base file for key order, default is en.json"),
+        )
+        .arg(
+            Arg::new("file")
+                .short('f')
+                .long("file")
+                .value_name("FILE")
+                .help("Specify a single file to process instead of the entire directory"),
         );
 
     let matches = cmd.clone().get_matches();
@@ -161,59 +168,112 @@ fn main() {
     let dir = dir.as_path();
 
     if matches.get_flag("duplicated_key") {
-        if !dir.exists() {
-            eprintln!("Directory does not exist: {}", dir.display());
-            std::process::exit(2);
-        }
+        if let Some(file) = matches.get_one::<String>("file") {
+            let path = Path::new(file);
+            match find_duplicates_in_file(path) {
+                Ok(dups) => {
+                    if dups.is_empty() {
+                        println!("{}: OK", path.display());
+                    } else {
+                        println!("{}: DUPLICATES:", path.display());
+                        for (k, c) in dups {
+                            println!("  {}  ({} times)", k, c);
+                        }
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{}: ERROR: {}", path.display(), e);
+                    std::process::exit(2);
+                }
+            }
+            std::process::exit(0);
+        } else {
+            if !dir.exists() {
+                eprintln!("Directory does not exist: {}", dir.display());
+                std::process::exit(2);
+            }
 
-        let mut any_errors = false;
-        let mut any_duplicates = false;
+            let mut any_errors = false;
+            let mut any_duplicates = false;
 
-        let read = fs::read_dir(dir).unwrap_or_else(|e| {
-            eprintln!("Failed to read directory {}: {}", dir.display(), e);
-            std::process::exit(2);
-        });
+            let read = fs::read_dir(dir).unwrap_or_else(|e| {
+                eprintln!("Failed to read directory {}: {}", dir.display(), e);
+                std::process::exit(2);
+            });
 
-        for entry in read.flatten() {
-            let path = entry.path();
-            if path.is_file()
-                && let Some(ext) = path.extension()
-                && ext == "json"
-            {
-                match find_duplicates_in_file(&path) {
-                    Ok(dups) => {
-                        if dups.is_empty() {
-                            println!("{}: OK", path.display());
-                        } else {
-                            any_duplicates = true;
-                            println!("{}: DUPLICATES:", path.display());
-                            for (k, c) in dups {
-                                println!("  {}  ({} times)", k, c);
+            for entry in read.flatten() {
+                let path = entry.path();
+                if path.is_file()
+                    && let Some(ext) = path.extension()
+                    && ext == "json"
+                {
+                    match find_duplicates_in_file(&path) {
+                        Ok(dups) => {
+                            if dups.is_empty() {
+                                println!("{}: OK", path.display());
+                            } else {
+                                any_duplicates = true;
+                                println!("{}: DUPLICATES:", path.display());
+                                for (k, c) in dups {
+                                    println!("  {}  ({} times)", k, c);
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        any_errors = true;
-                        eprintln!("{}: ERROR: {}", path.display(), e);
+                        Err(e) => {
+                            any_errors = true;
+                            eprintln!("{}: ERROR: {}", path.display(), e);
+                        }
                     }
                 }
             }
-        }
 
-        if any_errors {
-            std::process::exit(2);
+            if any_errors {
+                std::process::exit(2);
+            }
+            if any_duplicates {
+                std::process::exit(1);
+            }
+            std::process::exit(0);
         }
-        if any_duplicates {
-            std::process::exit(1);
-        }
-        std::process::exit(0);
     }
 
     if matches.get_flag("missing_key") {
-        if !dir.exists() {
-            eprintln!("Directory does not exist: {}", dir.display());
+        let base_file = matches
+            .get_one::<String>("base")
+            .map(|s| s.as_str())
+            .unwrap_or("en.json");
+        let base_path = if base_file.contains('/') || base_file.contains('\\') {
+            Path::new(base_file).to_path_buf()
+        } else if let Some(file) = matches.get_one::<String>("file") {
+            Path::new(file)
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(base_file)
+        } else {
+            dir.join(base_file)
+        };
+        if !base_path.exists() {
+            eprintln!("Base file {} not found", base_path.display());
             std::process::exit(2);
         }
+
+        let base_s = fs::read_to_string(&base_path).unwrap_or_else(|e| {
+            eprintln!("Failed to read {}: {}", base_path.display(), e);
+            std::process::exit(2);
+        });
+
+        let base_value: Value = serde_json::from_str(&base_s).unwrap_or_else(|e| {
+            eprintln!("Failed to parse {}: {}", base_path.display(), e);
+            std::process::exit(2);
+        });
+
+        let base_keys: HashSet<String> = if let Value::Object(map) = base_value {
+            map.keys().cloned().collect()
+        } else {
+            eprintln!("{}: root is not an object", base_path.display());
+            std::process::exit(2);
+        };
 
         let export_dir = matches.get_one::<String>("export");
         if let Some(ed) = export_dir
@@ -223,111 +283,170 @@ fn main() {
             std::process::exit(2);
         }
 
-        let en_path = dir.join("en.json");
-        if !en_path.exists() {
-            eprintln!("en.json not found in {}", dir.display());
-            std::process::exit(2);
-        }
+        if let Some(file) = matches.get_one::<String>("file") {
+            let path = Path::new(file);
+            match fs::read_to_string(&path) {
+                Ok(s) => match serde_json::from_str(&s) {
+                    Ok(value) => {
+                        let keys: HashSet<String> = if let Value::Object(map) = value {
+                            map.keys().cloned().collect()
+                        } else {
+                            eprintln!("{}: root is not an object", path.display());
+                            std::process::exit(2);
+                        };
 
-        let en_s = fs::read_to_string(&en_path).unwrap_or_else(|e| {
-            eprintln!("Failed to read {}: {}", en_path.display(), e);
-            std::process::exit(2);
-        });
-
-        let en_value: Value = serde_json::from_str(&en_s).unwrap_or_else(|e| {
-            eprintln!("Failed to parse {}: {}", en_path.display(), e);
-            std::process::exit(2);
-        });
-
-        let en_keys: HashSet<String> = if let Value::Object(map) = en_value {
-            map.keys().cloned().collect()
-        } else {
-            eprintln!("{}: root is not an object", en_path.display());
-            std::process::exit(2);
-        };
-
-        let mut any_missing = false;
-
-        let read = fs::read_dir(dir).unwrap_or_else(|e| {
-            eprintln!("Failed to read directory {}: {}", dir.display(), e);
-            std::process::exit(2);
-        });
-
-        for entry in read.flatten() {
-            let path = entry.path();
-            if path.is_file() && path.extension() == Some("json".as_ref()) && path != en_path {
-                match fs::read_to_string(&path) {
-                    Ok(s) => match serde_json::from_str(&s) {
-                        Ok(value) => {
-                            let keys: HashSet<String> = if let Value::Object(map) = value {
-                                map.keys().cloned().collect()
-                            } else {
-                                eprintln!("{}: root is not an object", path.display());
-                                continue;
-                            };
-
-                            let missing: Vec<String> = en_keys.difference(&keys).cloned().collect();
-                            if missing.is_empty() {
-                                println!("{}: OK", path.display());
-                            } else {
-                                any_missing = true;
-                                println!("{}: MISSING:", path.display());
-                                for k in &missing {
-                                    println!("  {}", k);
+                        let missing: Vec<String> = base_keys.difference(&keys).cloned().collect();
+                        if missing.is_empty() {
+                            println!("{}: OK", path.display());
+                        } else {
+                            println!("{}: MISSING:", path.display());
+                            for k in &missing {
+                                println!("  {}", k);
+                            }
+                            if let Some(ed) = export_dir {
+                                let file_name = format!(
+                                    "{}_missing.json",
+                                    path.file_stem().unwrap().to_str().unwrap()
+                                );
+                                let export_path = Path::new(ed).join(file_name);
+                                let json = serde_json::to_string_pretty(&missing).unwrap();
+                                if let Err(e) = fs::write(&export_path, json) {
+                                    eprintln!("Failed to write {}: {}", export_path.display(), e);
+                                } else {
+                                    println!("Exported missing keys to {}", export_path.display());
                                 }
-                                if let Some(ed) = export_dir {
-                                    let file_name = format!(
-                                        "{}_missing.json",
-                                        path.file_stem().unwrap().to_str().unwrap()
-                                    );
-                                    let export_path = Path::new(ed).join(file_name);
-                                    let json = serde_json::to_string_pretty(&missing).unwrap();
-                                    if let Err(e) = fs::write(&export_path, json) {
-                                        eprintln!(
-                                            "Failed to write {}: {}",
-                                            export_path.display(),
-                                            e
+                            }
+                            std::process::exit(1);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("{}: ERROR: parse {}", path.display(), e);
+                        std::process::exit(2);
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Failed to read {}: {}", path.display(), e);
+                    std::process::exit(2);
+                }
+            }
+            std::process::exit(0);
+        } else {
+            if !dir.exists() {
+                eprintln!("Directory does not exist: {}", dir.display());
+                std::process::exit(2);
+            }
+
+            let en_path = dir.join("en.json");
+            if !en_path.exists() {
+                eprintln!("en.json not found in {}", dir.display());
+                std::process::exit(2);
+            }
+
+            let en_s = fs::read_to_string(&en_path).unwrap_or_else(|e| {
+                eprintln!("Failed to read {}: {}", en_path.display(), e);
+                std::process::exit(2);
+            });
+
+            let en_value: Value = serde_json::from_str(&en_s).unwrap_or_else(|e| {
+                eprintln!("Failed to parse {}: {}", en_path.display(), e);
+                std::process::exit(2);
+            });
+
+            let en_keys: HashSet<String> = if let Value::Object(map) = en_value {
+                map.keys().cloned().collect()
+            } else {
+                eprintln!("{}: root is not an object", en_path.display());
+                std::process::exit(2);
+            };
+
+            let mut any_missing = false;
+
+            let read = fs::read_dir(dir).unwrap_or_else(|e| {
+                eprintln!("Failed to read directory {}: {}", dir.display(), e);
+                std::process::exit(2);
+            });
+
+            for entry in read.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension() == Some("json".as_ref()) && path != en_path {
+                    match fs::read_to_string(&path) {
+                        Ok(s) => match serde_json::from_str(&s) {
+                            Ok(value) => {
+                                let keys: HashSet<String> = if let Value::Object(map) = value {
+                                    map.keys().cloned().collect()
+                                } else {
+                                    eprintln!("{}: root is not an object", path.display());
+                                    continue;
+                                };
+
+                                let missing: Vec<String> =
+                                    en_keys.difference(&keys).cloned().collect();
+                                if missing.is_empty() {
+                                    println!("{}: OK", path.display());
+                                } else {
+                                    any_missing = true;
+                                    println!("{}: MISSING:", path.display());
+                                    for k in &missing {
+                                        println!("  {}", k);
+                                    }
+                                    if let Some(ed) = export_dir {
+                                        let file_name = format!(
+                                            "{}_missing.json",
+                                            path.file_stem().unwrap().to_str().unwrap()
                                         );
-                                    } else {
-                                        println!(
-                                            "Exported missing keys to {}",
-                                            export_path.display()
-                                        );
+                                        let export_path = Path::new(ed).join(file_name);
+                                        let json = serde_json::to_string_pretty(&missing).unwrap();
+                                        if let Err(e) = fs::write(&export_path, json) {
+                                            eprintln!(
+                                                "Failed to write {}: {}",
+                                                export_path.display(),
+                                                e
+                                            );
+                                        } else {
+                                            println!(
+                                                "Exported missing keys to {}",
+                                                export_path.display()
+                                            );
+                                        }
                                     }
                                 }
                             }
-                        }
+                            Err(e) => {
+                                eprintln!("{}: ERROR: parse {}", path.display(), e);
+                            }
+                        },
                         Err(e) => {
-                            eprintln!("{}: ERROR: parse {}", path.display(), e);
+                            eprintln!("Failed to read {}: {}", path.display(), e);
                         }
-                    },
-                    Err(e) => {
-                        eprintln!("Failed to read {}: {}", path.display(), e);
                     }
                 }
             }
-        }
 
-        if any_missing {
-            std::process::exit(1);
-        } else {
-            std::process::exit(0);
+            if any_missing {
+                std::process::exit(1);
+            } else {
+                std::process::exit(0);
+            }
         }
     }
 
     if matches.get_flag("sort") {
-        if !dir.exists() {
-            eprintln!("Directory does not exist: {}", dir.display());
-            std::process::exit(2);
-        }
-
         let base_file = matches
             .get_one::<String>("base")
             .map(|s| s.as_str())
             .unwrap_or("en.json");
-        let base_path = dir.join(base_file);
+        let base_path = if base_file.contains('/') || base_file.contains('\\') {
+            Path::new(base_file).to_path_buf()
+        } else if let Some(file) = matches.get_one::<String>("file") {
+            Path::new(file)
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(base_file)
+        } else {
+            dir.join(base_file)
+        };
         if !base_path.exists() {
-            eprintln!("Base file {} not found in {}", base_file, dir.display());
+            eprintln!("Base file {} not found", base_path.display());
             std::process::exit(2);
         }
 
@@ -348,51 +467,99 @@ fn main() {
             std::process::exit(2);
         };
 
-        let read = fs::read_dir(dir).unwrap_or_else(|e| {
-            eprintln!("Failed to read directory {}: {}", dir.display(), e);
-            std::process::exit(2);
-        });
-
-        for entry in read.flatten() {
-            let path = entry.path();
-            if path.is_file() && path.extension() == Some("json".as_ref()) && path != base_path {
-                match fs::read_to_string(&path) {
-                    Ok(s) => match serde_json::from_str(&s) {
-                        Ok(value) => {
-                            if let Value::Object(mut map) = value {
-                                let mut sorted_map = serde_json::Map::new();
-                                for key in &keys {
-                                    if let Some(v) = map.remove(key) {
-                                        sorted_map.insert(key.clone(), v);
-                                    }
+        if let Some(file) = matches.get_one::<String>("file") {
+            let path = Path::new(file);
+            match fs::read_to_string(&path) {
+                Ok(s) => match serde_json::from_str(&s) {
+                    Ok(value) => {
+                        if let Value::Object(mut map) = value {
+                            let mut sorted_map = serde_json::Map::new();
+                            for key in &keys {
+                                if let Some(v) = map.remove(key) {
+                                    sorted_map.insert(key.clone(), v);
                                 }
-                                // add remaining keys
-                                for (k, v) in map {
-                                    sorted_map.insert(k, v);
-                                }
-                                let new_value = Value::Object(sorted_map);
-                                let json = serde_json::to_string_pretty(&new_value).unwrap();
-                                if let Err(e) = fs::write(&path, json) {
-                                    eprintln!("Failed to write {}: {}", path.display(), e);
-                                } else {
-                                    println!("Sorted {}", path.display());
-                                }
-                            } else {
-                                eprintln!("{}: root is not an object", path.display());
                             }
+                            // add remaining keys
+                            for (k, v) in map {
+                                sorted_map.insert(k, v);
+                            }
+                            let new_value = Value::Object(sorted_map);
+                            let json = serde_json::to_string_pretty(&new_value).unwrap();
+                            if let Err(e) = fs::write(&path, json) {
+                                eprintln!("Failed to write {}: {}", path.display(), e);
+                                std::process::exit(2);
+                            } else {
+                                println!("Sorted {}", path.display());
+                            }
+                        } else {
+                            eprintln!("{}: root is not an object", path.display());
+                            std::process::exit(2);
                         }
-                        Err(e) => {
-                            eprintln!("{}: ERROR: parse {}", path.display(), e);
-                        }
-                    },
+                    }
                     Err(e) => {
-                        eprintln!("Failed to read {}: {}", path.display(), e);
+                        eprintln!("{}: ERROR: parse {}", path.display(), e);
+                        std::process::exit(2);
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Failed to read {}: {}", path.display(), e);
+                    std::process::exit(2);
+                }
+            }
+            std::process::exit(0);
+        } else {
+            if !dir.exists() {
+                eprintln!("Directory does not exist: {}", dir.display());
+                std::process::exit(2);
+            }
+
+            let read = fs::read_dir(dir).unwrap_or_else(|e| {
+                eprintln!("Failed to read directory {}: {}", dir.display(), e);
+                std::process::exit(2);
+            });
+
+            for entry in read.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension() == Some("json".as_ref()) && path != base_path
+                {
+                    match fs::read_to_string(&path) {
+                        Ok(s) => match serde_json::from_str(&s) {
+                            Ok(value) => {
+                                if let Value::Object(mut map) = value {
+                                    let mut sorted_map = serde_json::Map::new();
+                                    for key in &keys {
+                                        if let Some(v) = map.remove(key) {
+                                            sorted_map.insert(key.clone(), v);
+                                        }
+                                    }
+                                    // add remaining keys
+                                    for (k, v) in map {
+                                        sorted_map.insert(k, v);
+                                    }
+                                    let new_value = Value::Object(sorted_map);
+                                    let json = serde_json::to_string_pretty(&new_value).unwrap();
+                                    if let Err(e) = fs::write(&path, json) {
+                                        eprintln!("Failed to write {}: {}", path.display(), e);
+                                    } else {
+                                        println!("Sorted {}", path.display());
+                                    }
+                                } else {
+                                    eprintln!("{}: root is not an object", path.display());
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("{}: ERROR: parse {}", path.display(), e);
+                            }
+                        },
+                        Err(e) => {
+                            eprintln!("Failed to read {}: {}", path.display(), e);
+                        }
                     }
                 }
             }
-        }
 
-        std::process::exit(0);
+            std::process::exit(0);
+        }
     }
 
     // default behavior: show help
