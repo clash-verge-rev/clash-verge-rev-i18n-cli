@@ -1,4 +1,5 @@
 use clap::{Arg, ArgAction, Command};
+use indexmap::IndexMap;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -7,79 +8,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn extract_top_level_keys(s: &str) -> Vec<String> {
-    let bytes = s.as_bytes();
-    let mut i = 0usize;
-    let len = bytes.len();
-    let mut depth: i32 = 0;
-    let mut keys = Vec::new();
-
-    while i < len {
-        match bytes[i] as char {
-            '{' => {
-                depth += 1;
-                i += 1;
-            }
-            '}' => {
-                depth -= 1;
-                i += 1;
-            }
-            '"' if depth == 1 => {
-                // parse string
-                i += 1; // skip opening quote
-                let mut key = Vec::new();
-                while i < len {
-                    let b = bytes[i];
-                    if b == b'\\' {
-                        // escape, include next byte as-is
-                        if i + 1 < len {
-                            key.push(bytes[i + 1]);
-                            i += 2;
-                        } else {
-                            i += 1;
-                        }
-                    } else if b == b'"' {
-                        // end of string
-                        i += 1;
-                        break;
-                    } else {
-                        key.push(b);
-                        i += 1;
-                    }
-                }
-                // skip whitespace
-                while i < len && (bytes[i] as char).is_whitespace() {
-                    i += 1;
-                }
-                // if next non-space char is ':' then this string is a key at top-level
-                if i < len && bytes[i] == b':' {
-                    // convert key bytes to String
-                    if let Ok(s) = String::from_utf8(key) {
-                        keys.push(s);
-                    }
-                }
-            }
-            '"' => {
-                // string at other depths - skip it safely
-                i += 1;
-                while i < len {
-                    let b = bytes[i];
-                    if b == b'\\' {
-                        i += 2;
-                    } else if b == b'"' {
-                        i += 1;
-                        break;
-                    } else {
-                        i += 1;
-                    }
-                }
-            }
-            _ => {
-                i += 1;
-            }
-        }
+    match serde_json::from_str::<Value>(s) {
+        Ok(Value::Object(map)) => map.keys().cloned().collect(),
+        _ => Vec::new(),
     }
-
-    keys
 }
 
 fn find_duplicates_in_file(path: &Path) -> Result<HashMap<String, usize>, String> {
@@ -243,13 +175,12 @@ fn main() {
             .get_one::<String>("base")
             .map(|s| s.as_str())
             .unwrap_or("en.json");
+        // Resolve base path: if user provided an explicit path (contains / or \\), use it.
+        // Otherwise always use the `dir` (the chosen locales directory) joined with base_file.
+        // This makes the default base file `en.json` come from the `-d`/default directory
+        // even when a single file is passed with -f.
         let base_path = if base_file.contains('/') || base_file.contains('\\') {
             Path::new(base_file).to_path_buf()
-        } else if let Some(file) = matches.get_one::<String>("file") {
-            Path::new(file)
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join(base_file)
         } else {
             dir.join(base_file)
         };
@@ -268,7 +199,8 @@ fn main() {
             std::process::exit(2);
         });
 
-        let base_keys: HashSet<String> = if let Value::Object(map) = base_value {
+        // preserve base key order for reporting missing keys
+        let base_keys_vec: Vec<String> = if let Value::Object(map) = base_value {
             map.keys().cloned().collect()
         } else {
             eprintln!("{}: root is not an object", base_path.display());
@@ -285,7 +217,7 @@ fn main() {
 
         if let Some(file) = matches.get_one::<String>("file") {
             let path = Path::new(file);
-            match fs::read_to_string(&path) {
+            match fs::read_to_string(path) {
                 Ok(s) => match serde_json::from_str(&s) {
                     Ok(value) => {
                         let keys: HashSet<String> = if let Value::Object(map) = value {
@@ -295,7 +227,12 @@ fn main() {
                             std::process::exit(2);
                         };
 
-                        let missing: Vec<String> = base_keys.difference(&keys).cloned().collect();
+                        // collect missing keys in the same order as base file
+                        let missing: Vec<String> = base_keys_vec
+                            .iter()
+                            .filter(|k| !keys.contains(*k))
+                            .cloned()
+                            .collect();
                         if missing.is_empty() {
                             println!("{}: OK", path.display());
                         } else {
@@ -352,7 +289,8 @@ fn main() {
                 std::process::exit(2);
             });
 
-            let en_keys: HashSet<String> = if let Value::Object(map) = en_value {
+            // preserve en.json key order for reporting missing keys
+            let en_keys_vec: Vec<String> = if let Value::Object(map) = en_value {
                 map.keys().cloned().collect()
             } else {
                 eprintln!("{}: root is not an object", en_path.display());
@@ -379,8 +317,12 @@ fn main() {
                                     continue;
                                 };
 
-                                let missing: Vec<String> =
-                                    en_keys.difference(&keys).cloned().collect();
+                                // collect missing keys in en.json order
+                                let missing: Vec<String> = en_keys_vec
+                                    .iter()
+                                    .filter(|k| !keys.contains(*k))
+                                    .cloned()
+                                    .collect();
                                 if missing.is_empty() {
                                     println!("{}: OK", path.display());
                                 } else {
@@ -435,13 +377,9 @@ fn main() {
             .get_one::<String>("base")
             .map(|s| s.as_str())
             .unwrap_or("en.json");
+        // Resolve base path: prefer explicit path if provided, otherwise use `dir/en.json`
         let base_path = if base_file.contains('/') || base_file.contains('\\') {
             Path::new(base_file).to_path_buf()
-        } else if let Some(file) = matches.get_one::<String>("file") {
-            Path::new(file)
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join(base_file)
         } else {
             dir.join(base_file)
         };
@@ -455,37 +393,45 @@ fn main() {
             std::process::exit(2);
         });
 
-        let base_value: Value = serde_json::from_str(&base_s).unwrap_or_else(|e| {
-            eprintln!("Failed to parse {}: {}", base_path.display(), e);
-            std::process::exit(2);
-        });
+        let base_indexmap: IndexMap<String, Value> =
+            serde_json::from_str(&base_s).unwrap_or_else(|e| {
+                eprintln!("Failed to parse {} as IndexMap: {}", base_path.display(), e);
+                std::process::exit(2);
+            });
 
-        let keys: Vec<String> = if let Value::Object(map) = base_value {
-            map.keys().cloned().collect()
-        } else {
-            eprintln!("{}: root is not an object", base_path.display());
-            std::process::exit(2);
-        };
+
+        // Use keys from the parsed IndexMap to preserve the textual order from the base file
+        let keys: Vec<String> = base_indexmap.keys().cloned().collect();
+
+        
 
         if let Some(file) = matches.get_one::<String>("file") {
             let path = Path::new(file);
-            match fs::read_to_string(&path) {
+            match fs::read_to_string(path) {
                 Ok(s) => match serde_json::from_str(&s) {
                     Ok(value) => {
                         if let Value::Object(mut map) = value {
-                            let mut sorted_map = serde_json::Map::new();
+                            let mut sorted_map: IndexMap<String, Value> = IndexMap::new();
+                            let mut missing_base: Vec<String> = Vec::new();
                             for key in &keys {
                                 if let Some(v) = map.remove(key) {
+                                    // if debug { eprintln!("[debug] inserting base key: {}", key); }
                                     sorted_map.insert(key.clone(), v);
+                                } else {
+                                    missing_base.push(key.clone());
                                 }
                             }
-                            // add remaining keys
-                            for (k, v) in map {
+                            
+                            let mut remaining: Vec<(String, Value)> = map.into_iter().collect();
+                            remaining.sort_by(|a, b| a.0.cmp(&b.0));
+                            
+                            for (k, v) in remaining {
+                                // if debug { eprintln!("[debug] inserting remaining key: {}", k); }
                                 sorted_map.insert(k, v);
                             }
-                            let new_value = Value::Object(sorted_map);
-                            let json = serde_json::to_string_pretty(&new_value).unwrap();
-                            if let Err(e) = fs::write(&path, json) {
+                            
+                            let json = serde_json::to_string_pretty(&sorted_map).unwrap();
+                            if let Err(e) = fs::write(path, json) {
                                 eprintln!("Failed to write {}: {}", path.display(), e);
                                 std::process::exit(2);
                             } else {
@@ -518,7 +464,10 @@ fn main() {
                 std::process::exit(2);
             });
 
-            for entry in read.flatten() {
+            let mut entries: Vec<_> = read.flatten().collect();
+            entries.sort_by_key(|entry| entry.path());
+
+            for entry in entries {
                 let path = entry.path();
                 if path.is_file() && path.extension() == Some("json".as_ref()) && path != base_path
                 {
@@ -526,18 +475,28 @@ fn main() {
                         Ok(s) => match serde_json::from_str(&s) {
                             Ok(value) => {
                                 if let Value::Object(mut map) = value {
-                                    let mut sorted_map = serde_json::Map::new();
+                                    let mut sorted_map: IndexMap<String, Value> = IndexMap::new();
+                                    let mut missing_base: Vec<String> = Vec::new();
                                     for key in &keys {
                                         if let Some(v) = map.remove(key) {
+                                            // if debug { eprintln!("[debug] inserting base key: {}", key); }
                                             sorted_map.insert(key.clone(), v);
+                                        } else {
+                                            missing_base.push(key.clone());
                                         }
                                     }
+                                    
                                     // add remaining keys
-                                    for (k, v) in map {
+                                    let mut remaining: Vec<(String, Value)> =
+                                        map.into_iter().collect();
+                                    remaining.sort_by(|a, b| a.0.cmp(&b.0));
+                                    
+                                    for (k, v) in remaining {
+                                        // if debug { eprintln!("[debug] inserting remaining key: {}", k); }
                                         sorted_map.insert(k, v);
                                     }
-                                    let new_value = Value::Object(sorted_map);
-                                    let json = serde_json::to_string_pretty(&new_value).unwrap();
+                                    
+                                    let json = serde_json::to_string_pretty(&sorted_map).unwrap();
                                     if let Err(e) = fs::write(&path, json) {
                                         eprintln!("Failed to write {}: {}", path.display(), e);
                                     } else {
